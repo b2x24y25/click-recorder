@@ -1,1 +1,205 @@
+name: 构建点击记录APK
+on: [push, workflow_dispatch]
 
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.2'
+
+      - name: 自动生成全部项目文件
+        run: |
+          # 创建目录结构
+          mkdir -p app/src/main/java/com/demo/clickrecorder
+          mkdir -p app/src/main/res/xml
+          mkdir -p app/src/main/res/values
+
+          # 1. 根构建配置
+          cat << 'EOF' > settings.gradle
+          include ':app'
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.2.0' apply false
+          }
+          EOF
+
+          # 2. 模块构建配置
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.demo.clickrecorder'
+              compileSdk 33
+              defaultConfig {
+                  applicationId "com.demo.clickrecorder"
+                  minSdk 26
+                  targetSdk 33
+                  versionCode 1
+                  versionName "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF
+
+          # 3. 应用清单
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="true"
+                  android:label="点击记录器"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.Light">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".ClickRecordService"
+                      android:exported="true"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          # 4. 无障碍服务配置
+          cat << 'EOF' > app/src/main/res/xml/accessibility_service_config.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeViewClicked|typeViewLongClicked"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canRetrieveWindowContent="true"
+              android:description="@string/service_desc"
+              android:notificationTimeout="100" />
+          EOF
+
+          # 5. 字符串资源
+          cat << 'EOF' > app/src/main/res/values/strings.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="service_desc">记录屏幕点击的坐标与时间</string>
+          </resources>
+          EOF
+
+          # 6. 主界面代码
+          cat << 'EOF' > app/src/main/java/com/demo/clickrecorder/MainActivity.java
+          package com.demo.clickrecorder;
+          import android.app.Activity;
+          import android.content.SharedPreferences;
+          import android.os.Bundle;
+          import android.widget.Button;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          public class MainActivity extends Activity {
+              private TextView recordText;
+              private SharedPreferences sp;
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  sp = getSharedPreferences("click_records", MODE_PRIVATE);
+                  ScrollView scrollView = new ScrollView(this);
+                  recordText = new TextView(this);
+                  recordText.setPadding(32, 32, 32, 32);
+                  recordText.setTextSize(14);
+                  Button clearBtn = new Button(this);
+                  clearBtn.setText("清空记录");
+                  clearBtn.setOnClickListener(v -> {
+                      sp.edit().clear().apply();
+                      updateRecords();
+                  });
+                  android.widget.LinearLayout layout = new android.widget.LinearLayout(this);
+                  layout.setOrientation(android.widget.LinearLayout.VERTICAL);
+                  layout.addView(clearBtn);
+                  layout.addView(scrollView);
+                  scrollView.addView(recordText);
+                  setContentView(layout);
+                  updateRecords();
+              }
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  updateRecords();
+              }
+              private void updateRecords() {
+                  String records = sp.getString("records", "暂无记录\n请先在系统无障碍设置中开启服务");
+                  recordText.setText(records);
+              }
+          }
+          EOF
+
+          # 7. 点击记录无障碍服务
+          cat << 'EOF' > app/src/main/java/com/demo/clickrecorder/ClickRecordService.java
+          package com.demo.clickrecorder;
+          import android.accessibilityservice.AccessibilityService;
+          import android.content.SharedPreferences;
+          import android.view.accessibility.AccessibilityEvent;
+          import android.graphics.Rect;
+          import java.text.SimpleDateFormat;
+          import java.util.Date;
+          import java.util.Locale;
+          public class ClickRecordService extends AccessibilityService {
+              private SharedPreferences sp;
+              private SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  sp = getSharedPreferences("click_records", MODE_PRIVATE);
+              }
+              @Override
+              public void onAccessibilityEvent(AccessibilityEvent event) {
+                  if (event.getEventType() == AccessibilityEvent.TYPE_VIEW_CLICKED
+                          || event.getEventType() == AccessibilityEvent.TYPE_VIEW_LONG_CLICKED) {
+                      try {
+                          Rect rect = new Rect();
+                          event.getSource().getBoundsInScreen(rect);
+                          int x = rect.centerX();
+                          int y = rect.centerY();
+                          String time = sdf.format(new Date());
+                          String type = event.getEventType() == AccessibilityEvent.TYPE_VIEW_CLICKED ? "点击" : "长按";
+                          String newRecord = String.format("[%s] %s 坐标: (%d, %d)\n", time, type, x, y);
+                          String oldRecords = sp.getString("records", "");
+                          sp.edit().putString("records", newRecord + oldRecords).apply();
+                      } catch (Exception ignored) {}
+                  }
+              }
+              @Override
+              public void onInterrupt() {}
+          }
+          EOF
+
+      - name: 生成Wrapper并编译
+        run: |
+          gradle wrapper
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: 上传APK安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: 点击记录器APK
+          path: app/build/outputs/apk/debug/*.apk
